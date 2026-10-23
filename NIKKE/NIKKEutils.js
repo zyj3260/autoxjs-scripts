@@ -5,6 +5,7 @@ var {
   rgbToGray, getRandomArea, swipeRandom, ocrInfo,
   screenshot, appear, appearThenClick
 } = require('./utils.js');
+var { resolveServerProfile } = require('./serverProfile.js');
 var firstCheckAuto = true;
 var homeBtn = null;
 if (typeof module === 'undefined') {
@@ -56,6 +57,72 @@ function saveError(error) {
   files.write(files.join(errorPath, 'log.txt'), errorStrs.join('\n'));
   console.error(`出错日志已保存到${errorPath}`);
   console.error('上报问题时请务必附上上述出错日志目录中的内容');
+}
+function currentServerProfile(storage) {
+  storage = storage || storages.create('NIKKEconfig');
+  return resolveServerProfile({
+    serverRegion: storage.get('serverRegion', 'intl'),
+    packageNameOverride: storage.get('packageNameOverride', ''),
+    appNameOverride: storage.get('appNameOverride', '')
+  });
+}
+function launchPackageName(packageName) {
+  if (!packageName)
+    return false;
+  if (typeof app.launchPackage === 'function') {
+    try {
+      return !!app.launchPackage(packageName);
+    } catch (error) {
+      log('launchPackage失败：' + error);
+    }
+  }
+  if (typeof app.launch === 'function') {
+    try {
+      return !!app.launch(packageName);
+    } catch (error) {
+      log('按包名启动失败：' + error);
+    }
+  }
+  try {
+    const intent = context.getPackageManager().getLaunchIntentForPackage(packageName);
+    if (!intent)
+      return false;
+    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+    context.startActivity(intent);
+    return true;
+  } catch (error) {
+    log('启动Intent失败：' + error);
+    return false;
+  }
+}
+function launchInstalledGame(profile) {
+  if (profile.usePackageLaunch) {
+    log('尝试通过包名启动：' + profile.packageName);
+    if (launchPackageName(profile.packageName)) {
+      log('已通过包名启动：' + profile.packageName);
+      return;
+    }
+    log('包名启动未成功，改为尝试应用显示名');
+  }
+  const names = profile.launchNames || ['NIKKE'];
+  for (let i = 0; i < names.length; ++i) {
+    if (app.launchApp(names[i])) {
+      log('打开' + names[i]);
+      return;
+    }
+  }
+  // 只按应用名启动时，Android 11 以下的 launchApp 返回值不可靠
+  if (!profile.usePackageLaunch && device.sdkInt < 30) {
+    toastLog('无法确定是否成功打开' + names[0]);
+    return;
+  }
+  throw new Error(profile.launchError);
+}
+function stopInstalledGame(profile) {
+  if (profile.packageName && killApp(profile.packageName) !== false)
+    return;
+  const names = profile.launchNames || ['NIKKE'];
+  killApp(names[0]);
 }
 function 启动NIKKE() {
   let NIKKEstorage = storages.create("NIKKEconfig");
@@ -138,19 +205,13 @@ function 启动NIKKE() {
     id('fab').click();
   }
   if (launchMethod == 'NIKKE') {
-    if (NIKKEstorage.get('startGooglePlayFirst', false)) {
+    const profile = currentServerProfile(NIKKEstorage);
+    // 国服不走 Google Play。该选项没有设置界面，只保留给国际服。
+    if (profile.region != 'cn' && NIKKEstorage.get('startGooglePlayFirst', false)) {
       app.launchApp('Google Play 商店');
       sleep(50);
     }
-    if (app.launchApp("NIKKE")) {
-      // waitForActivity('com.shiftup.nk.MainActivity');
-      log("打开NIKKE");
-    } else if (device.sdkInt < 30) {
-      toastLog("无法确定是否成功打开NIKKE");
-    } else {
-      // 参考：https://developer.android.com/training/package-visibility
-      throw new Error('无法启动NIKKE，请确保Autox.js拥有“读取已安装应用列表”权限');
-    }
+    launchInstalledGame(profile);
   } else if (launchMethod == 'OurPlay') {
     startFromOurPlay();
   } else if (launchMethod == 'Manually') {
@@ -174,6 +235,10 @@ function backToAnnouncement() {
 }
 function checkInLIP() {
   let NIKKEstorage = storages.create("NIKKEconfig");
+  if (!currentServerProfile(NIKKEstorage).lipEnabled) {
+    log('国服无 Level Infinite Pass，跳过签到');
+    return;
+  }
   if (NIKKEstorage.get('doCheckInLIP', true) != true) {
     return;
   }
@@ -267,6 +332,10 @@ function checkInLIP() {
 }
 function tryLogin() {
   const NIKKEstorage = storages.create("NIKKEconfig");
+  if (!currentServerProfile(NIKKEstorage).emailLoginEnabled) {
+    log('国服不使用国际服邮箱登录，已跳过');
+    return false;
+  }
   const { email, password } = NIKKEstorage.get('account', {});
   const launchMethod = NIKKEstorage.get('launchMethod', null);
   if (!email || !password) {
@@ -400,11 +469,18 @@ function tryLogin() {
 function 等待NIKKE加载() {
   let [width, height] = getDisplaySize();
   let manuallyEnter = true;
+  let loggedCnLoginSkip = false;
+  const serverProfile = currentServerProfile();
   const continueBtn = getRandomArea(captureScreen(), [0.2, 0.2, 0.8, 0.8]);
   continueBtn.text = 'TOUCH TO CONTINUE';
   if (ocrUntilFound(res => {
     if (res.text.match(/(密|验证)码/) != null) {
-      if (!tryLogin()) {
+      if (!serverProfile.emailLoginEnabled) {
+        if (!loggedCnLoginSkip) {
+          log('国服跳过邮箱登录，继续等待进入大厅。需要自己登录时，请改用「自行手动进入游戏」');
+          loggedCnLoginSkip = true;
+        }
+      } else if (!tryLogin()) {
         toastLog('未登录游戏，停止运行脚本');
         home();
         exit();
@@ -491,7 +567,7 @@ function 退出NIKKE() {
   const NIKKEstorage = storages.create("NIKKEconfig");
   const launchMethod = NIKKEstorage.get('launchMethod', 'NIKKE');
   if (launchMethod == 'NIKKE') {
-    killApp('NIKKE');
+    stopInstalledGame(currentServerProfile(NIKKEstorage));
     if (storages.create("NIKKEconfig").get('v2rayNG', false) && app.launchApp("v2rayNG")) {
       for (let i = 0; i < 5; ++i) {
         let st = id('tv_test_state').findOne(2000);

@@ -1,4 +1,7 @@
 "ui";
+var {
+  resolveServerProfile, SERVER_REGION_OPTIONS, isValidPackageName
+} = require('./serverProfile.js');
 
 ui.layout(
   <vertical>
@@ -37,6 +40,7 @@ ui.layout(
             <Switch text="静音运行（需要修改系统设置权限）" id="mute" textSize="16sp" margin="10 2" />
             <Switch text="打开本界面时自动检查更新" id="checkUpdateAuto" textSize="16sp" margin="10 2" />
             <Switch text="Level Infinite Pass签到" id="doCheckInLIP" textSize="16sp" margin="10 2" />
+            <text id="doCheckInLIPHint" text="" textSize="12sp" textColor="#999999" margin="10 0 10 4" visibility="gone" />
             <Switch text="游戏中会出现限时礼包" id="checkSale" textSize="16sp" margin="10 2" />
             <Switch text="运行结束后退出游戏" id="exitGame" textSize="16sp" margin="10 2" />
             <Switch text="检查自动瞄准及爆裂" id="checkGameAuto" textSize="16sp" margin="10 2" />
@@ -50,6 +54,13 @@ ui.layout(
               <text id="maxRetryText" textSize="16sp" textColor="#222222" w="0" layout_weight="6">脚本出错时不重试</text>
               <seekbar id="maxRetry" w="0" layout_weight="4" layout_gravity="center" />
             </horizontal>
+            <horizontal margin="10 2" gravity="center_vertical|left" weightSum="10" h="0" layout_weight="1">
+              <text textSize="16sp" textColor="#222222" w="0" layout_weight="4">服务器</text>
+              <spinner id="serverRegion" entries="国际服|国服" spinnerMode="dialog" w="0" layout_weight="6" />
+            </horizontal>
+            <text id="serverRegionHint" textSize="12sp" textColor="#999999" margin="10 0 10 4" />
+            <input id="packageNameOverride" hint="包名，留空使用默认" textSize="14sp" margin="10 2" />
+            <input id="appNameOverride" hint="应用显示名，留空使用默认" textSize="14sp" margin="10 2" />
             <horizontal margin="10 2" gravity="center_vertical|left" weightSum="10" h="0" layout_weight="1">
               <text textSize="16sp" textColor="#222222" w="0" layout_weight="4">游戏启动方式</text>
               <spinner id="launchMethod" entries="启动游戏本体|通过OurPlay启动|自行手动进入游戏" spinnerMode="dialog" w="0" layout_weight="6" />
@@ -555,6 +566,56 @@ for (let generalOption of [
 ])
   ui.findView(generalOption).setChecked(NIKKEstorage.get(generalOption, true));
 
+// 国服会暂时关掉 LIP 开关，但不要改掉国际服里保存的选择
+let lipPreference = ui.doCheckInLIP.isChecked();
+let serverRegionReady = false;
+ui.packageNameOverride.setText(NIKKEstorage.get('packageNameOverride', '') || '');
+ui.appNameOverride.setText(NIKKEstorage.get('appNameOverride', '') || '');
+
+function selectedServerRegion() {
+  const selected = ui.serverRegion.getSelectedItem();
+  if (!selected)
+    return 'intl';
+  for (let region of SERVER_REGION_OPTIONS) {
+    if (region.displayValue == selected.toString())
+      return region.value;
+  }
+  return 'intl';
+}
+function applyServerRegionUi() {
+  const region = selectedServerRegion();
+  const profile = resolveServerProfile({ serverRegion: region });
+  ui.serverRegionHint.setText(profile.hint);
+  if (region == 'cn') {
+    if (ui.doCheckInLIP.isEnabled())
+      lipPreference = ui.doCheckInLIP.isChecked();
+    ui.doCheckInLIP.setChecked(false);
+    ui.doCheckInLIP.setEnabled(false);
+    ui.doCheckInLIPHint.setText(profile.lipHint);
+    ui.doCheckInLIPHint.attr('visibility', 'visible');
+  } else {
+    ui.doCheckInLIP.setEnabled(true);
+    ui.doCheckInLIP.setChecked(!!lipPreference);
+    ui.doCheckInLIPHint.attr('visibility', 'gone');
+  }
+}
+let savedServerRegion = NIKKEstorage.get('serverRegion', 'intl');
+for (let i = 0; i < SERVER_REGION_OPTIONS.length; ++i) {
+  if (SERVER_REGION_OPTIONS[i].value == savedServerRegion) {
+    ui.serverRegion.setSelection(i);
+    break;
+  }
+}
+ui.serverRegion.setOnItemSelectedListener({
+  onItemSelected: function () {
+    applyServerRegionUi();
+    if (serverRegionReady && selectedServerRegion() == 'cn')
+      toast('国服将按包名启动，并跳过 Level Infinite Pass 签到');
+  }
+});
+applyServerRegionUi();
+serverRegionReady = true;
+
 // 检查更新
 if (NIKKEstorage.get('checkUpdateAuto', false)) {
   toastLog('自动检查更新中……');
@@ -582,6 +643,7 @@ const dialogView = ui.inflate(
   <vertical padding="16">
     <text textSize="12sp" text="明文存储，可能有安全风险" />
     <text textSize="12sp" text="仅在通过游戏本体启动时可以自动输入账号密码" />
+    <text textSize="12sp" text="国服使用腾讯账号，选择国服后不会自动填写这里的邮箱" />
     <text textSize="12sp" text="如果使用密码管理软件，可能需要对NIKKE禁用自动填充" />
     <input id="email" hint="邮箱账号" inputType="textEmailAddress" />
     <input id="password" hint="密码" inputType="textPassword" />
@@ -613,6 +675,12 @@ ui.save.on("click", function () {
   let team = ui.simTeam.text().split(/[,\s，]/g).filter(x => x.length > 0);
   if (team.length != 0 && team.length != 5) {
     toast('模拟室编队格式有误，无法保存');
+    return;
+  }
+  const packageNameOverride = ui.packageNameOverride.text().trim();
+  const appNameOverride = ui.appNameOverride.text().trim();
+  if (!isValidPackageName(packageNameOverride)) {
+    toast('包名格式不正确，例如 com.tencent.nikke');
     return;
   }
   if (ui.findView('每日任务').isChecked() && ui.equipEnhanceNikke.text().trim() == '') {
@@ -673,10 +741,23 @@ ui.save.on("click", function () {
   NIKKEstorage.put('dailyMission', dailyMission);
 
   for (let generalOption of [
-    'mute', 'doCheckInLIP', 'checkUpdateAuto', 'checkSale',
+    'mute', 'checkUpdateAuto', 'checkSale',
     'exitGame', 'checkGameAuto', 'alwaysCheckDailyLogin', 'v2rayNG'
   ])
     NIKKEstorage.put(generalOption, ui.findView(generalOption).isChecked());
+  // 国服界面上 LIP 被关掉只是为了避免误运行，国际服原来的开关留在 lipPreference 里
+  if (selectedServerRegion() == 'cn')
+    NIKKEstorage.put('doCheckInLIP', !!lipPreference);
+  else
+    NIKKEstorage.put('doCheckInLIP', ui.doCheckInLIP.isChecked());
+  NIKKEstorage.put('packageNameOverride', packageNameOverride);
+  NIKKEstorage.put('appNameOverride', appNameOverride);
+  for (let region of SERVER_REGION_OPTIONS) {
+    if (region.displayValue == ui.serverRegion.getSelectedItem().toString()) {
+      NIKKEstorage.put('serverRegion', region.value);
+      break;
+    }
+  }
   NIKKEstorage.put('checkDailyLogin', ui.checkDailyLogin.getProgress());
   NIKKEstorage.put('maxRetry', ui.maxRetry.getProgress());
   for (let lm of launchMethodsList) {
